@@ -17,6 +17,10 @@ def extract_label_from_filename(filename):
 
 def resize_video(input_path, output_path, height=256, width=320):
     """Resize video to exact dimensions of height x width"""
+    if os.path.exists(output_path):
+        print(f"Video already exists, skipping: {output_path}")
+        return
+
     cmd = [
         'ffmpeg', '-i', input_path,
         '-vf', f'scale={width}:{height}',  # Set exact dimensions
@@ -58,10 +62,9 @@ def generate_csv_files(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1):
     # Save CSV files
     for split_name, split_videos in splits.items():
         csv_path = Path(output_dir) / f'{split_name}.csv'
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.writer(f)
+        with open(csv_path, 'w') as f:
             for video_path, label in split_videos:
-                writer.writerow([video_path, label])
+                f.write(f"{video_path} {label}\n")
         print(f"Created {split_name}.csv with {len(split_videos)} videos")
     
     return splits
@@ -83,7 +86,7 @@ def process_videos(splits, output_dir):
             new_filename = f'video_{idx:06d}.mp4'
             new_path = str(video_dir / new_filename)
             
-            # Resize video
+            # Resize video if it doesn't exist
             print(f"Processing {old_path} -> {new_path}")
             resize_video(old_path, new_path)
             
@@ -91,13 +94,37 @@ def process_videos(splits, output_dir):
             rel_path = os.path.join('videos', new_filename)
             new_rows.append([rel_path, label])
         
-        # Update the CSV file with new paths
+        # Update the CSV file with space-separated values
         csv_path = Path(output_dir) / f'{split_name}.csv'
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerows(new_rows)
+        with open(csv_path, 'w') as f:
+            for rel_path, label in new_rows:
+                f.write(f"{rel_path} {label}\n")
         
         print(f"Updated {split_name}.csv with {len(new_rows)} processed videos")
+
+def update_csv_delimiter(input_dir, output_dir):
+    """Update CSV files to use space as delimiter"""
+    print("Step 1: Updating CSV files with space delimiter...")
+    
+    for split_name in ['train', 'val', 'test']:
+        csv_path = Path(output_dir) / f'{split_name}.csv'
+        if csv_path.exists():
+            # Read existing CSV and update delimiter
+            videos = []
+            with open(csv_path, 'r') as f:
+                for line in f:
+                    if ',' in line:  # If comma-separated
+                        path, label = line.strip().split(',')
+                    else:  # If space-separated or other format
+                        parts = line.strip().split()
+                        path, label = parts[0], parts[-1]
+                    videos.append((path, label))
+            
+            # Write back with space delimiter
+            with open(csv_path, 'w') as f:
+                for path, label in videos:
+                    f.write(f"{path} {label}\n")
+            print(f"Updated delimiter in {split_name}.csv")
 
 def preprocess_dataset(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1):
     """
@@ -112,16 +139,18 @@ def preprocess_dataset(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Generate CSV files with splits
-    splits = generate_csv_files(input_dir, output_dir, train_ratio, val_ratio)
-    
-    # Step 2: Process and resize videos
-    process_videos(splits, output_dir)
-    
-    # Print summary
-    print("\nPreprocessing completed:")
-    for split_name, videos in splits.items():
-        print(f"{split_name}: {len(videos)} videos")
+    # Step 1: Update CSV delimiters if files exist
+    if any((output_dir / f"{split}.csv").exists() for split in ['train', 'val', 'test']):
+        update_csv_delimiter(input_dir, output_dir)
+    else:
+        print("No existing CSV files found. Please run the full preprocessing first.")
+        return
+
+    # Step 2: Check if any videos need processing
+    video_dir = output_dir / 'videos'
+    if not video_dir.exists():
+        print("Video directory doesn't exist. Please run full preprocessing first.")
+        return
 
 if __name__ == '__main__':
     import argparse

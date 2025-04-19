@@ -16,3 +16,4 @@ libtorch
 build
 .DS_store
 *.egg-info
+finetuned_model

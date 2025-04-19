@@ -11,7 +11,6 @@ from pathlib import Path
 from collections import OrderedDict
 
 from mixup import Mixup
-from timm.models import create_model
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import ModelEma
 from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
@@ -147,8 +146,9 @@ def get_args():
     parser.add_argument('--num_segments', type=int, default= 1)
     parser.add_argument('--num_frames', type=int, default= 16)
     parser.add_argument('--sampling_rate', type=int, default= 4)
-    parser.add_argument('--data_set', default='Kinetics-400', choices=['Kinetics-400', 'SSV2', 'UCF101', 'HMDB51','image_folder'],
-                        type=str, help='dataset')
+    parser.add_argument('--data_set', default='Kinetics-400', 
+                       choices=['Kinetics-400', 'SSV2', 'UCF101', 'HMDB51', 'image_folder', 'XD-Violence'],
+                       type=str, help='dataset')
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default=None,
@@ -205,7 +205,7 @@ def get_args():
     return parser.parse_args(), ds_init
 
 
-def main(args, ds_init):
+def main(args, ds_init=None):
     utils.init_distributed_mode(args)
 
     if ds_init is not None:
@@ -230,24 +230,25 @@ def main(args, ds_init):
         dataset_val, _ = build_dataset(is_train=False, test_mode=False, args=args)
     dataset_test, _ = build_dataset(is_train=False, test_mode=True, args=args)
     
-
     num_tasks = utils.get_world_size()
     global_rank = utils.get_rank()
+    
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-    )
+    ) if args.distributed else None
     print("Sampler_train = %s" % str(sampler_train))
-    if args.dist_eval:
-        if len(dataset_val) % num_tasks != 0:
-            print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                    'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                    'equal num of samples per-process.')
+    
+    if args.distributed and dataset_val is not None:
         sampler_val = torch.utils.data.DistributedSampler(
             dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+    else:
+        sampler_val = None
+        
+    if args.distributed:
         sampler_test = torch.utils.data.DistributedSampler(
             dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=False)
     else:
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_test = None
 
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
@@ -300,21 +301,22 @@ def main(args, ds_init):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-    model = create_model(
-        args.model,
-        pretrained=False,
-        num_classes=args.nb_classes,
-        all_frames=args.num_frames * args.num_segments,
-        tubelet_size=args.tubelet_size,
-        fc_drop_rate=args.fc_drop_rate,
-        drop_rate=args.drop,
-        drop_path_rate=args.drop_path,
-        attn_drop_rate=args.attn_drop_rate,
-        drop_block_rate=None,
-        use_checkpoint=args.use_checkpoint,
-        use_mean_pooling=args.use_mean_pooling,
-        init_scale=args.init_scale,
-    )
+    if args.model == 'vit_base_patch16_224':
+        from modeling_finetune import vit_base_patch16_224
+        model = vit_base_patch16_224(
+            num_classes=args.nb_classes,
+            all_frames=args.num_frames * args.num_segments,
+            tubelet_size=args.tubelet_size,
+            fc_drop_rate=args.fc_drop_rate,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            attn_drop_rate=args.attn_drop_rate,
+            use_checkpoint=args.use_checkpoint,
+            use_mean_pooling=args.use_mean_pooling,
+            init_scale=args.init_scale,
+        )
+    else:
+        raise ValueError(f"Unsupported model type: {args.model}")
 
     patch_size = model.patch_embed.patch_size
     print("Patch size = %s" % str(patch_size))
@@ -497,12 +499,11 @@ def main(args, ds_init):
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer,
-            device, epoch, loss_scaler, args.clip_grad, model_ema, mixup_fn,
+            model, data_loader_train, optimizer,
+            device, epoch, loss_scaler, args.clip_grad,
             log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
-            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
-        )
+            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq)
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(

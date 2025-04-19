@@ -1,19 +1,23 @@
 import io
 import os
-import math
 import time
 import json
+import glob
+import random
+import numpy as np
+import math
 from collections import defaultdict, deque
 import datetime
 import numpy as np
 from timm.utils import get_state_dict
+
+import torch
+import torch.distributed as dist
+from torch import inf  # Replace torch._six.inf with torch.inf
+
 from torch.utils.data._utils.collate import default_collate
 from pathlib import Path
 import subprocess
-import torch
-import torch.distributed as dist
-from torch._six import inf
-import random
 
 from tensorboardX import SummaryWriter
 

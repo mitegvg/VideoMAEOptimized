@@ -21,52 +21,50 @@ def get_loss_scale_for_deepspeed(model):
     return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
 
 
-def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
-                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                    model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None, log_writer=None,
-                    start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
-                    num_training_steps_per_epoch=None, update_freq=None):
-    model.train(True)
+def train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler,
+                     max_norm=0, update_freq=1, mixup_fn=None, log_writer=None,
+                     args=None, fp16=True, start_steps=None, lr_schedule_values=None,
+                     wd_schedule_values=None, num_training_steps_per_epoch=None,
+                     update_grad=True, model_ema=None):
+    model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
-    if loss_scaler is None:
-        model.zero_grad()
-        model.micro_steps = 0
-    else:
-        optimizer.zero_grad()
+    if args is not None and hasattr(args, 'distributed') and args.distributed:
+        data_loader.sampler.set_epoch(epoch)
 
-    for data_iter_step, (samples, targets, _, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        step = data_iter_step // update_freq
-        if step >= num_training_steps_per_epoch:
-            continue
-        it = start_steps + step  # global training iteration
-        # Update LR & WD for the first acc
-        if lr_schedule_values is not None or wd_schedule_values is not None and data_iter_step % update_freq == 0:
-            for i, param_group in enumerate(optimizer.param_groups):
+    optimizer.zero_grad()
+
+    criterion = torch.nn.CrossEntropyLoss()
+
+    for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        # we use a per iteration (instead of per epoch) lr scheduler
+        if data_iter_step % update_freq == 0:
+            if lr_schedule_values is not None or wd_schedule_values is not None and data_iter_step % update_freq == 0:
+                it = data_iter_step // update_freq + start_steps
                 if lr_schedule_values is not None:
-                    param_group["lr"] = lr_schedule_values[it] * param_group["lr_scale"]
-                if wd_schedule_values is not None and param_group["weight_decay"] > 0:
-                    param_group["weight_decay"] = wd_schedule_values[it]
+                    for i, param_group in enumerate(optimizer.param_groups):
+                        if lr_schedule_values is not None:
+                            param_group["lr"] = lr_schedule_values[it] * param_group["lr_scale"]
+                if wd_schedule_values is not None and len(wd_schedule_values) > it:
+                    for i, param_group in enumerate(optimizer.param_groups):
+                        if param_group["weight_decay"] > 0:
+                            param_group["weight_decay"] = wd_schedule_values[it]
 
-        samples = samples.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
+        samples = batch[0]
+        targets = torch.tensor(batch[1])
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        if loss_scaler is None:
-            samples = samples.half()
-            loss, output = train_class_batch(
-                model, samples, targets, criterion)
-        else:
+        if fp16:
             with torch.cuda.amp.autocast():
-                loss, output = train_class_batch(
-                    model, samples, targets, criterion)
+                loss, output = train_class_batch(model, samples, targets, criterion)
+        else: 
+            loss, output = train_class_batch(model, samples, targets, criterion)
 
         loss_value = loss.item()
 
@@ -74,40 +72,31 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        if loss_scaler is None:
-            loss /= update_freq
-            model.backward(loss)
-            model.step()
-
-            if (data_iter_step + 1) % update_freq == 0:
-                # model.zero_grad()
-                # Deepspeed will call step() & model.zero_grad() automatic
-                if model_ema is not None:
-                    model_ema.update(model)
-            grad_norm = None
-            loss_scale_value = get_loss_scale_for_deepspeed(model)
-        else:
+        loss /= update_freq
+        grad_norm = None
+        if fp16:
             # this attribute is added by timm on one optimizer (adahessian)
             is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            loss /= update_freq
-            grad_norm = loss_scaler(loss, optimizer, clip_grad=max_norm,
-                                    parameters=model.parameters(), create_graph=is_second_order,
-                                    update_grad=(data_iter_step + 1) % update_freq == 0)
+            loss_scaler(loss, optimizer, clip_grad=max_norm,
+                    parameters=model.parameters(), create_graph=is_second_order,
+                    update_grad=(data_iter_step + 1) % update_freq == 0)
             if (data_iter_step + 1) % update_freq == 0:
                 optimizer.zero_grad()
                 if model_ema is not None:
                     model_ema.update(model)
-            loss_scale_value = loss_scaler.state_dict()["scale"]
+        else:
+            loss.backward()
+            if (data_iter_step + 1) % update_freq == 0:
+                if max_norm is not None:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                optimizer.step()
+                optimizer.zero_grad()
+                if model_ema is not None:
+                    model_ema.update(model)
 
         torch.cuda.synchronize()
 
-        if mixup_fn is None:
-            class_acc = (output.max(-1)[-1] == targets).float().mean()
-        else:
-            class_acc = None
         metric_logger.update(loss=loss_value)
-        metric_logger.update(class_acc=class_acc)
-        metric_logger.update(loss_scale=loss_scale_value)
         min_lr = 10.
         max_lr = 0.
         for group in optimizer.param_groups:
@@ -121,17 +110,16 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if group["weight_decay"] > 0:
                 weight_decay_value = group["weight_decay"]
         metric_logger.update(weight_decay=weight_decay_value)
-        metric_logger.update(grad_norm=grad_norm)
+        if grad_norm is not None:
+            metric_logger.update(grad_norm=grad_norm)
 
         if log_writer is not None:
             log_writer.update(loss=loss_value, head="loss")
-            log_writer.update(class_acc=class_acc, head="loss")
-            log_writer.update(loss_scale=loss_scale_value, head="opt")
             log_writer.update(lr=max_lr, head="opt")
             log_writer.update(min_lr=min_lr, head="opt")
             log_writer.update(weight_decay=weight_decay_value, head="opt")
-            log_writer.update(grad_norm=grad_norm, head="opt")
-
+            if grad_norm is not None:
+                log_writer.update(grad_norm=grad_norm, head="opt")
             log_writer.set_step()
 
     # gather the stats from all processes
