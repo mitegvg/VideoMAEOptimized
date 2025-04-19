@@ -5,3 +5,14 @@ __pycache__
 *.pth.tar.bz2
 *.pth.tar.xz
 *.pth.tar.lzma
+processed_dataset
+dataset_root
+*.safetensors
+libtorch
+*.onnx
+*.pt
+*.bin
+*.ckpt
+build
+.DS_store
+*.egg-info

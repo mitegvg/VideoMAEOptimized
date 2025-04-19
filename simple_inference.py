@@ -21,7 +21,7 @@ def get_args():
     parser.add_argument('--checkpoint', default='checkpoint-vitb-2.pth', help='Path to local checkpoint file')
     parser.add_argument('--use_huggingface', action='store_true', help='Use Hugging Face model instead of local checkpoint')
     parser.add_argument('--huggingface_dir', default=None, help='Path to local Hugging Face model directory')
-    parser.add_argument('--video', default='sample_0002.mp4', help='Path to input video file')
+    parser.add_argument('--video', default='../testing-samples/sample_0002.mp4', help='Path to input video file')
     parser.add_argument('--save_model', action='store_true', help='Save the Hugging Face model as a local .pth file')
     parser.add_argument('--output_pth', default='videomae_huggingface.pth', help='Path to save the model as .pth file')
     parser.add_argument('--compare_models', action='store_true', help='Compare results between Hugging Face and local checkpoint')

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VideoMAE Inference</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .input-container {
+            margin: 20px 0;
+        }
+        #videoPreview {
+            max-width: 100%;
+            margin: 20px 0;
+        }
+        #results {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            display: none;
+        }
+        .loading {
+            display: none;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>VideoMAE Video Classification</h1>
+    <div class="input-container">
+        <input type="file" id="videoInput" accept="video/*">
+    </div>
+    <video id="videoPreview" controls style="display: none;"></video>
+    <button id="runInference">Run Classification</button>
+    <div id="loading" class="loading">Processing video...</div>
+    <div id="results"></div>
+
+    <script src="wasm_interface.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
