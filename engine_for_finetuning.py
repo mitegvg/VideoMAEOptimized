@@ -10,9 +10,14 @@ import utils
 from scipy.special import softmax
 
 
-def train_class_batch(model, samples, target, criterion):
+def train_class_batch(model, samples, targets, criterion):
+    # Move samples to the same device as model
+    device = next(model.parameters()).device
+    samples = samples.to(device)
+    targets = targets.to(device)
+    
     outputs = model(samples)
-    loss = criterion(outputs, target)
+    loss = criterion(outputs, targets)
     return loss, outputs
 
 
@@ -25,7 +30,7 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler,
                      max_norm=0, update_freq=1, mixup_fn=None, log_writer=None,
                      args=None, fp16=True, start_steps=None, lr_schedule_values=None,
                      wd_schedule_values=None, num_training_steps_per_epoch=None,
-                     update_grad=True, model_ema=None):
+                     update_grad=True, model_ema=None, progress_log_interval=10):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -39,8 +44,24 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler,
     optimizer.zero_grad()
 
     criterion = torch.nn.CrossEntropyLoss()
+    
+    print(f"Starting training loop for epoch {epoch} with {len(data_loader)} batches")
+
+    # Clear CUDA cache at the beginning of each epoch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("CUDA cache cleared at the beginning of epoch")
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        # Log progress at specified intervals
+        if data_iter_step % progress_log_interval == 0:
+            print(f"Processing batch {data_iter_step}/{len(data_loader)} in epoch {epoch}")
+            
+            # Periodically clear CUDA cache
+            if torch.cuda.is_available() and data_iter_step > 0 and data_iter_step % 50 == 0:
+                torch.cuda.empty_cache()
+                print(f"CUDA cache cleared at step {data_iter_step}")
+        
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % update_freq == 0:
             if lr_schedule_values is not None or wd_schedule_values is not None and data_iter_step % update_freq == 0:
@@ -54,73 +75,96 @@ def train_one_epoch(model, data_loader, optimizer, device, epoch, loss_scaler,
                         if param_group["weight_decay"] > 0:
                             param_group["weight_decay"] = wd_schedule_values[it]
 
-        samples = batch[0]
-        targets = torch.tensor(batch[1])
+        try:
+            samples = batch[0]
+            targets = torch.tensor(batch[1])
+            print(f"Loaded batch {data_iter_step} with {len(samples)} samples")
 
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
+            if mixup_fn is not None:
+                samples, targets = mixup_fn(samples, targets)
 
-        if fp16:
-            with torch.cuda.amp.autocast():
+            if fp16:
+                with torch.cuda.amp.autocast():
+                    loss, output = train_class_batch(model, samples, targets, criterion)
+            else: 
                 loss, output = train_class_batch(model, samples, targets, criterion)
-        else: 
-            loss, output = train_class_batch(model, samples, targets, criterion)
 
-        loss_value = loss.item()
+            loss_value = loss.item()
 
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
+            if not math.isfinite(loss_value):
+                print("Loss is {}, stopping training".format(loss_value))
+                sys.exit(1)
 
-        loss /= update_freq
-        grad_norm = None
-        if fp16:
-            # this attribute is added by timm on one optimizer (adahessian)
-            is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=is_second_order,
-                    update_grad=(data_iter_step + 1) % update_freq == 0)
-            if (data_iter_step + 1) % update_freq == 0:
-                optimizer.zero_grad()
-                if model_ema is not None:
-                    model_ema.update(model)
-        else:
-            loss.backward()
-            if (data_iter_step + 1) % update_freq == 0:
-                if max_norm is not None:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-                optimizer.step()
-                optimizer.zero_grad()
-                if model_ema is not None:
-                    model_ema.update(model)
+            loss /= update_freq
+            grad_norm = None
+            if fp16:
+                # this attribute is added by timm on one optimizer (adahessian)
+                is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+                loss_scaler(loss, optimizer, clip_grad=max_norm,
+                        parameters=model.parameters(), create_graph=is_second_order,
+                        update_grad=(data_iter_step + 1) % update_freq == 0)
+                if (data_iter_step + 1) % update_freq == 0:
+                    optimizer.zero_grad()
+                    if model_ema is not None:
+                        model_ema.update(model)
+            else:
+                loss.backward()
+                if (data_iter_step + 1) % update_freq == 0:
+                    if max_norm is not None:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    if model_ema is not None:
+                        model_ema.update(model)
 
-        torch.cuda.synchronize()
+            torch.cuda.synchronize()
+            
+            # Print progress information
+            if data_iter_step % progress_log_interval == 0:
+                print(f"Completed batch {data_iter_step}/{len(data_loader)}, loss: {loss_value:.4f}")
 
-        metric_logger.update(loss=loss_value)
-        min_lr = 10.
-        max_lr = 0.
-        for group in optimizer.param_groups:
-            min_lr = min(min_lr, group["lr"])
-            max_lr = max(max_lr, group["lr"])
+            metric_logger.update(loss=loss_value)
+            min_lr = 10.
+            max_lr = 0.
+            for group in optimizer.param_groups:
+                min_lr = min(min_lr, group["lr"])
+                max_lr = max(max_lr, group["lr"])
 
-        metric_logger.update(lr=max_lr)
-        metric_logger.update(min_lr=min_lr)
-        weight_decay_value = None
-        for group in optimizer.param_groups:
-            if group["weight_decay"] > 0:
-                weight_decay_value = group["weight_decay"]
-        metric_logger.update(weight_decay=weight_decay_value)
-        if grad_norm is not None:
-            metric_logger.update(grad_norm=grad_norm)
-
-        if log_writer is not None:
-            log_writer.update(loss=loss_value, head="loss")
-            log_writer.update(lr=max_lr, head="opt")
-            log_writer.update(min_lr=min_lr, head="opt")
-            log_writer.update(weight_decay=weight_decay_value, head="opt")
+            metric_logger.update(lr=max_lr)
+            metric_logger.update(min_lr=min_lr)
+            weight_decay_value = None
+            for group in optimizer.param_groups:
+                if group["weight_decay"] > 0:
+                    weight_decay_value = group["weight_decay"]
+            metric_logger.update(weight_decay=weight_decay_value)
             if grad_norm is not None:
-                log_writer.update(grad_norm=grad_norm, head="opt")
-            log_writer.set_step()
+                metric_logger.update(grad_norm=grad_norm)
+
+            if log_writer is not None:
+                log_writer.update(loss=loss_value, head="loss")
+                log_writer.update(lr=max_lr, head="opt")
+                log_writer.update(min_lr=min_lr, head="opt")
+                log_writer.update(weight_decay=weight_decay_value, head="opt")
+                if grad_norm is not None:
+                    log_writer.update(grad_norm=grad_norm, head="opt")
+                log_writer.set_step()
+                
+        except Exception as e:
+            print(f"Error processing batch {data_iter_step}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Clear CUDA cache when an error occurs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("CUDA cache cleared after error")
+                
+            continue
+
+    # Final CUDA cache cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("CUDA cache cleared at the end of epoch")
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

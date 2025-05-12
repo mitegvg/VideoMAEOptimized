@@ -493,17 +493,37 @@ def main(args, ds_init=None):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
+    
+    # Track progress during training
+    progress_log_interval = 10  # Log progress every 10 batches
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
+            
+        print(f"\n=== Starting epoch {epoch+1}/{args.epochs} ===")
+        print(f"Number of training steps in this epoch: {num_training_steps_per_epoch}")
+        print(f"Training with batch size: {args.batch_size}, update frequency: {args.update_freq}")
+        
         train_stats = train_one_epoch(
             model, data_loader_train, optimizer,
             device, epoch, loss_scaler, args.clip_grad,
             log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
-            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq)
+            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
+            progress_log_interval=progress_log_interval)
+            
+        # Ensure default values for 'loss' and 'acc1' in train_stats
+        if 'loss' not in train_stats:
+            train_stats['loss'] = 0.0
+        if 'acc1' not in train_stats:
+            train_stats['acc1'] = 0.0
+            
+        print(f"\n=== Completed epoch {epoch+1}/{args.epochs} ===")
+        print(f"Training stats: loss={train_stats['loss']:.4f}, accuracy={train_stats['acc1']:.2f}%")
+        
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
@@ -562,4 +582,15 @@ if __name__ == '__main__':
     opts, ds_init = get_args()
     if opts.output_dir:
         Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Clear CUDA cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("CUDA cache cleared before starting training")
+    
     main(opts, ds_init)
+    
+    # Clear CUDA cache after completing training
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("CUDA cache cleared after completing training")

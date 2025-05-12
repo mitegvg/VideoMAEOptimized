@@ -70,7 +70,7 @@ def build_dataset(is_train, test_mode, args):
 
         dataset = VideoClsDataset(
             anno_path=anno_path,
-            data_path='/',
+            data_path=args.data_path,  # Use data_path from args instead of hardcoded '/'
             mode=mode,
             clip_len=args.num_frames,
             frame_sample_rate=args.sampling_rate,
@@ -101,7 +101,7 @@ def build_dataset(is_train, test_mode, args):
 
         dataset = VideoClsDataset(
             anno_path=anno_path,
-            data_path='/',
+            data_path=args.data_path,  # Use data_path from args instead of hardcoded '/'
             mode=mode,
             clip_len=args.num_frames,
             frame_sample_rate=args.sampling_rate,
@@ -132,7 +132,7 @@ def build_dataset(is_train, test_mode, args):
 
         dataset = SSVideoClsDataset(
             anno_path=anno_path,
-            data_path='/',
+            data_path=args.data_path,  # Use data_path from args instead of hardcoded '/'
             mode=mode,
             clip_len=1,
             num_segment=args.num_frames,
@@ -162,7 +162,7 @@ def build_dataset(is_train, test_mode, args):
 
         dataset = VideoClsDataset(
             anno_path=anno_path,
-            data_path='/',
+            data_path=args.data_path,  # Use data_path from args instead of hardcoded '/'
             mode=mode,
             clip_len=args.num_frames,
             frame_sample_rate=args.sampling_rate,
@@ -193,7 +193,7 @@ def build_dataset(is_train, test_mode, args):
 
         dataset = VideoClsDataset(
             anno_path=anno_path,
-            data_path='/',
+            data_path=args.data_path,  # Use data_path from args instead of hardcoded '/'
             mode=mode,
             clip_len=args.num_frames,
             frame_sample_rate=args.sampling_rate,

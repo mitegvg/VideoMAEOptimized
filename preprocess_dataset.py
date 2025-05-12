@@ -31,19 +31,37 @@ def resize_video(input_path, output_path, height=256, width=320):
     ]
     subprocess.run(cmd)
 
+def save_original_mapping(videos, output_dir):
+    """Save mapping between original and new video paths"""
+    mapping_path = Path(output_dir) / 'original.csv'
+    with open(mapping_path, 'w') as f:
+        for orig_path, new_path, label in videos:
+            orig_filename = Path(orig_path).name
+            f.write(f"{orig_filename} {new_path} {label}\n")
+    print(f"Created original.csv with {len(videos)} video mappings")
+
 def generate_csv_files(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1):
-    """Generate CSV files with splits"""
+    """Generate CSV files with splits using new normalized paths"""
     print("Step 1: Generating CSV files with labels...")
     
     # Get all video files and their labels
     videos = []
+    global_idx = 0
+    
     for video_path in Path(input_dir).glob('*.mp4'):
         label = extract_label_from_filename(video_path.name)
         if label:
-            videos.append((str(video_path), label))
+            # Generate new normalized filename right from the start
+            new_filename = f'video_{global_idx:06d}.mp4'
+            rel_path = os.path.join('videos', new_filename)
+            videos.append((str(video_path), rel_path, label))
+            global_idx += 1
     
     if not videos:
         raise ValueError("No valid video files found with labels in the input directory")
+    
+    # Save original path mapping before shuffling
+    save_original_mapping(videos, output_dir)
     
     # Shuffle videos
     random.shuffle(videos)
@@ -59,18 +77,18 @@ def generate_csv_files(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1):
         'test': videos[n_train + n_val:]
     }
     
-    # Save CSV files
+    # Save CSV files with new paths
     for split_name, split_videos in splits.items():
         csv_path = Path(output_dir) / f'{split_name}.csv'
         with open(csv_path, 'w') as f:
-            for video_path, label in split_videos:
-                f.write(f"{video_path} {label}\n")
+            for _, new_path, label in split_videos:
+                f.write(f"{new_path} {label}\n")
         print(f"Created {split_name}.csv with {len(split_videos)} videos")
     
     return splits
 
 def process_videos(splits, output_dir):
-    """Process and resize videos based on the CSV files"""
+    """Process and resize videos based on the splits"""
     print("Step 2: Processing and resizing videos...")
     video_dir = Path(output_dir) / 'videos'
     video_dir.mkdir(parents=True, exist_ok=True)
@@ -78,29 +96,15 @@ def process_videos(splits, output_dir):
     # Process videos for each split
     for split_name, videos in splits.items():
         print(f"\nProcessing {split_name} split...")
-        new_rows = []
         
         # Process each video
-        for idx, (old_path, label) in enumerate(videos):
-            # Create new filename in format video_XXXXXX.mp4
-            new_filename = f'video_{idx:06d}.mp4'
-            new_path = str(video_dir / new_filename)
+        for old_path, new_rel_path, label in videos:
+            # Get full output path
+            new_path = str(Path(output_dir) / new_rel_path)
             
             # Resize video if it doesn't exist
             print(f"Processing {old_path} -> {new_path}")
             resize_video(old_path, new_path)
-            
-            # Add to new rows with relative path
-            rel_path = os.path.join('videos', new_filename)
-            new_rows.append([rel_path, label])
-        
-        # Update the CSV file with space-separated values
-        csv_path = Path(output_dir) / f'{split_name}.csv'
-        with open(csv_path, 'w') as f:
-            for rel_path, label in new_rows:
-                f.write(f"{rel_path} {label}\n")
-        
-        print(f"Updated {split_name}.csv with {len(new_rows)} processed videos")
 
 def update_csv_delimiter(input_dir, output_dir):
     """Update CSV files to use space as delimiter"""
@@ -139,18 +143,12 @@ def preprocess_dataset(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Update CSV delimiters if files exist
-    if any((output_dir / f"{split}.csv").exists() for split in ['train', 'val', 'test']):
-        update_csv_delimiter(input_dir, output_dir)
-    else:
-        print("No existing CSV files found. Please run the full preprocessing first.")
-        return
+    # Generate splits with normalized paths
+    splits = generate_csv_files(input_dir, output_dir, train_ratio, val_ratio)
+    
+    # Process and resize videos using the normalized paths
+    process_videos(splits, output_dir)
 
-    # Step 2: Check if any videos need processing
-    video_dir = output_dir / 'videos'
-    if not video_dir.exists():
-        print("Video directory doesn't exist. Please run full preprocessing first.")
-        return
 
 if __name__ == '__main__':
     import argparse

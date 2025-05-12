@@ -227,23 +227,37 @@ class VideoClsDataset(Dataset):
 
     def loadvideo_decord(self, sample, sample_rate_scale=1):
         """Load video content using Decord"""
-        fname = sample
+        # Join the data_path with the sample path to get the correct full path
+        # Ensure we don't have any leading slashes in the sample path
+        sample = sample.lstrip('/')
+        fname = os.path.join(self.data_path, sample)
 
         if not (os.path.exists(fname)):
-            return []
+            print(f"ERROR: Video file not found: {fname}")
+            # Try an alternate path construction as a fallback
+            alt_fname = os.path.join(self.data_path, 'videos', os.path.basename(sample))
+            if os.path.exists(alt_fname):
+                print(f"Found video at alternate path: {alt_fname}")
+                fname = alt_fname
+            else:
+                return []
 
         # avoid hanging issue
         if os.path.getsize(fname) < 1 * 1024:
-            print('SKIP: ', fname, " - ", os.path.getsize(fname))
+            print('SKIP: ', fname, " - File too small, size:", os.path.getsize(fname), "bytes")
             return []
+        
+        print(f"Loading video: {fname}")
         try:
             if self.keep_aspect_ratio:
                 vr = VideoReader(fname, num_threads=1, ctx=cpu(0))
             else:
                 vr = VideoReader(fname, width=self.new_width, height=self.new_height,
                                  num_threads=1, ctx=cpu(0))
-        except:
-            print("video cannot be loaded by decord: ", fname)
+            print(f"Successfully loaded video: {fname}, frames: {len(vr)}")
+        except Exception as e:
+            print(f"ERROR: Failed to load video with Decord: {fname}")
+            print(f"Exception details: {str(e)}")
             return []
 
         if self.mode == 'test':
@@ -257,10 +271,16 @@ class VideoClsDataset(Dataset):
         # handle temporal segments
         converted_len = int(self.clip_len * self.frame_sample_rate)
         seg_len = len(vr) // self.num_segment
+        
+        if len(vr) < self.num_segment:
+            print(f"WARNING: Video {fname} has only {len(vr)} frames, but needs at least {self.num_segment} segments")
+        
+        print(f"Processing {fname} - Total frames: {len(vr)}, Segments: {self.num_segment}, Segment length: {seg_len}")
 
         all_index = []
         for i in range(self.num_segment):
             if seg_len <= converted_len:
+                print(f"WARNING: Segment {i} of {fname} is too short. Segment length: {seg_len}, Required length: {converted_len}")
                 index = np.linspace(0, seg_len, num=seg_len // self.frame_sample_rate)
                 index = np.concatenate((index, np.ones(self.clip_len - seg_len // self.frame_sample_rate) * seg_len))
                 index = np.clip(index, 0, seg_len - 1).astype(np.int64)
@@ -273,9 +293,18 @@ class VideoClsDataset(Dataset):
             all_index.extend(list(index))
 
         all_index = all_index[::int(sample_rate_scale)]
-        vr.seek(0)
-        buffer = vr.get_batch(all_index).asnumpy()
-        return buffer
+        print(f"Sampling {len(all_index)} frames from {fname}")
+        
+        try:
+            vr.seek(0)
+            buffer = vr.get_batch(all_index).asnumpy()
+            print(f"Successfully extracted {buffer.shape[0]} frames from {fname}")
+            return buffer
+        except Exception as e:
+            print(f"ERROR: Failed to extract frames from {fname}")
+            print(f"Frame indices: {all_index}")
+            print(f"Exception details: {str(e)}")
+            return []
 
     def __len__(self):
         if self.mode != 'test':
